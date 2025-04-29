@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use crate::input::common;
 use crate::{EngineConfig, Flags};
+use dynamo_llm::http::service::ModelManager;
 use dynamo_llm::{
     engines::StreamingEngineAdapter,
     http::service::{discovery, service_v2},
@@ -29,6 +30,7 @@ use dynamo_llm::{
         openai::completions::{CompletionRequest, CompletionResponse},
     },
 };
+use dynamo_runtime::transports::etcd;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
 /// Build and run an HTTP service
@@ -57,17 +59,22 @@ pub async fn run(
                     let network_prefix = component.service_name();
 
                     // Listen for models registering themselves in etcd, add them to HTTP service
-                    let state = Arc::new(discovery::ModelWatchState {
-                        prefix: network_prefix.clone(),
-                        model_type: ModelType::Chat,
-                        manager: http_service.model_manager().clone(),
-                        drt: distributed_runtime.clone(),
-                    });
-                    tracing::info!("Waiting for remote model at {network_prefix}");
-                    let models_watcher =
-                        etcd_client.kv_get_and_watch_prefix(network_prefix).await?;
-                    let (_prefix, _watcher, receiver) = models_watcher.dissolve();
-                    let _watcher_task = tokio::spawn(discovery::model_watcher(state, receiver));
+                    run_watcher(
+                        distributed_runtime.clone(),
+                        http_service.model_manager().clone(),
+                        etcd_client.clone(),
+                        &network_prefix,
+                        ModelType::Chat,
+                    )
+                    .await?;
+                    run_watcher(
+                        distributed_runtime,
+                        http_service.model_manager().clone(),
+                        etcd_client,
+                        &network_prefix,
+                        ModelType::Completion,
+                    )
+                    .await?;
                 }
                 None => {
                     // Static endpoints don't need discovery
@@ -108,4 +115,26 @@ pub async fn run(
         EngineConfig::None => unreachable!(),
     }
     http_service.run(runtime.primary_token()).await
+}
+
+/// Spawns a task that watches for new models of the give model_type in etcd at network_prefix,
+/// and registers them with the ModelManager so that the HTTP service can use them.
+async fn run_watcher(
+    distributed_runtime: DistributedRuntime,
+    model_manager: ModelManager,
+    etcd_client: etcd::Client,
+    network_prefix: &str,
+    model_type: ModelType,
+) -> anyhow::Result<()> {
+    let state = Arc::new(discovery::ModelWatchState {
+        prefix: network_prefix.to_string(),
+        model_type,
+        manager: model_manager,
+        drt: distributed_runtime.clone(),
+    });
+    tracing::info!("Watching for remote {model_type} model at {network_prefix}");
+    let models_watcher = etcd_client.kv_get_and_watch_prefix(network_prefix).await?;
+    let (_prefix, _watcher, receiver) = models_watcher.dissolve();
+    let _watcher_task = tokio::spawn(discovery::model_watcher(state, receiver));
+    Ok(())
 }
