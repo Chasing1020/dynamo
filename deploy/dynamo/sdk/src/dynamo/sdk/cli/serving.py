@@ -247,6 +247,24 @@ def serve_dynamo_graph(
             logger.info(
                 f"Created watcher for {svc.name} with {num_workers} workers in the {namespace} namespace"
             )
+        # Not a dynamo component
+        else:
+            # DEBUG
+            logger.info(
+                f"Creating watcher for {svc.name} with {num_workers} workers in the {namespace} namespace"
+            )
+            worker_env = env.copy() if env else {}
+            watcher = create_circus_watcher(
+                name=f"{namespace}_{svc.name}",
+                args=dynamo_args,
+                numprocesses=num_workers,
+                working_dir=str(bento_path.absolute()),
+                env=worker_env,
+            )
+            watchers.append(watcher)
+            logger.info(
+                f"Created watcher for {svc.name} with {num_workers} workers in the {namespace} namespace"
+            )
 
         # inject runner map now
         inject_env = {"BENTOML_RUNNER_MAP": json.dumps(dependency_map)}
